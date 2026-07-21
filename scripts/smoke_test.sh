@@ -42,17 +42,14 @@ docker run -d --rm --name smoke-app --network "${NET}" \
 # 4. Health check FROM A CONTAINER on the same network, reaching the app
 #    by its name. Never touches the script's own localhost.
 echo "Waiting for app to come up..."
-for i in $(seq 1 30); do
-  if docker run --rm --network "${NET}" curlimages/curl:8.10.1 \
+if docker run --rm --network "${NET}" curlimages/curl:8.10.1 \
        -fsS "http://smoke-app:8000/health" >/dev/null 2>&1; then
     echo "Smoke test passed: /health returned 200."
     docker run --rm --network "${NET}" curlimages/curl:8.10.1 \
-       -fsS "http://smoke-app:8000/health"
+       -fsS "http://smoke-app:8000/health" || true
     echo
     exit 0
   fi
-  sleep 2
-done
 
 echo "ERROR: app did not pass smoke test in time." >&2
 docker logs smoke-app || true
