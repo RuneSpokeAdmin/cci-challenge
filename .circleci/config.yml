@@ -1,0 +1,181 @@
+version: 2.1
+
+# =============================================================================
+# CircleCI reference pipeline: build -> test -> package -> publish
+#
+# Builds a custom multi-stage Docker image, tests the application against a
+# live Postgres sidecar, collects JUnit results, and - only on the default
+# branch - publishes the image to Amazon ECR using OIDC (no static AWS keys).
+# =============================================================================
+
+orbs:
+  # aws-cli is used only for its OIDC helper, which exchanges the CircleCI
+  # OIDC token for short-lived AWS credentials. No long-lived keys stored.
+  aws-cli: circleci/aws-cli@5.1.0
+
+# ----------------------------------------------------------------------------
+# Reusable parameters and anchors
+# ----------------------------------------------------------------------------
+parameters:
+  python_image:
+    type: string
+    default: "cimg/python:3.12"
+
+# YAML anchor: the Postgres environment shared by test jobs.
+db_env: &db_env
+  DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/widgets"
+  DB_HOST: "localhost"
+  DB_PORT: "5432"
+
+# ----------------------------------------------------------------------------
+# Executors
+# ----------------------------------------------------------------------------
+executors:
+  python-with-db:
+    docker:
+      # Primary container: the application/test runtime.
+      - image: << pipeline.parameters.python_image >>
+        environment:
+          <<: *db_env
+      # SIDECAR / secondary service container: off-the-shelf Postgres.
+      - image: cimg/postgres:16.4
+        environment:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: widgets
+    resource_class: medium
+
+# ----------------------------------------------------------------------------
+# Jobs
+# ----------------------------------------------------------------------------
+jobs:
+
+  # --- 1. Lint + unit/integration tests against the live Postgres sidecar ---
+  test:
+    executor: python-with-db
+    steps:
+      - checkout
+
+      - restore_cache:
+          keys:
+            - pydeps-v1-{{ checksum "requirements-dev.txt" }}
+            - pydeps-v1-
+
+      - run:
+          name: Install dependencies
+          command: |
+            python -m venv venv
+            . venv/bin/activate
+            pip install --upgrade pip
+            pip install -r requirements-dev.txt
+
+      - save_cache:
+          key: pydeps-v1-{{ checksum "requirements-dev.txt" }}
+          paths:
+            - "venv"
+
+      - run:
+          name: Wait for Postgres sidecar (shell script)
+          command: |
+            sudo apt-get update && sudo apt-get install -y postgresql-client
+            ./scripts/wait_for_db.sh
+
+      - run:
+          name: Run pytest (emits JUnit XML + coverage)
+          command: |
+            . venv/bin/activate
+            mkdir -p test-results
+            pytest
+
+      # Native CircleCI test-result collection.
+      - store_test_results:
+          path: test-results
+
+      - store_artifacts:
+          path: test-results
+          destination: test-results
+
+      - store_artifacts:
+          path: coverage.xml
+          destination: coverage
+
+  # --- 2. Build the custom image, smoke-test it, publish to ECR via OIDC ---
+  #     Runs ONLY on the default branch (enforced in the workflow below).
+  build-and-publish:
+    docker:
+      - image: << pipeline.parameters.python_image >>
+    resource_class: medium
+    environment:
+      <<: *db_env
+    steps:
+      - checkout
+
+      # Enables `docker build` inside the Docker executor. DLC caches layers
+      # between builds - the single biggest build-time optimization here.
+      - setup_remote_docker:
+          docker_layer_caching: true
+
+      - run:
+          name: Build custom multi-stage image
+          command: |
+            IMAGE_LOCAL="widgets-api:${CIRCLE_SHA1:0:12}"
+            echo "export IMAGE_LOCAL=${IMAGE_LOCAL}" >> "$BASH_ENV"
+            docker build -t "${IMAGE_LOCAL}" .
+
+      # Bring up a throwaway Postgres to smoke-test the built image against.
+      - run:
+          name: Smoke-test the built image (shell script)
+          command: |
+            docker network create ci || true
+            docker run -d --rm --name pg \
+              -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
+              -e POSTGRES_DB=widgets -p 5432:5432 cimg/postgres:16.4
+            # give the DB a moment; the script polls health afterward
+            sleep 8
+            ./scripts/smoke_test.sh "${IMAGE_LOCAL}"
+
+      # --- OIDC: exchange CircleCI identity token for short-lived AWS creds ---
+      # No static AWS keys exist anywhere. The role ARN lives in a restricted
+      # context available only to approved builds on the default branch.
+      - aws-cli/setup:
+          role_arn: "${AWS_OIDC_ROLE_ARN}"
+          region: "${AWS_REGION}"
+
+      - run:
+          name: Push image to Amazon ECR
+          command: |
+            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+            REPO="${REGISTRY}/${ECR_REPO_NAME}"
+
+            aws ecr get-login-password --region "${AWS_REGION}" \
+              | docker login --username AWS --password-stdin "${REGISTRY}"
+
+            docker tag "${IMAGE_LOCAL}" "${REPO}:${CIRCLE_SHA1:0:12}"
+            docker tag "${IMAGE_LOCAL}" "${REPO}:latest"
+            docker push "${REPO}:${CIRCLE_SHA1:0:12}"
+            docker push "${REPO}:latest"
+
+            echo "Published ${REPO}:${CIRCLE_SHA1:0:12}"
+
+# ----------------------------------------------------------------------------
+# Workflows
+# ----------------------------------------------------------------------------
+workflows:
+  build-test-publish:
+    jobs:
+      # Tests run on every commit and every PR.
+      - test
+
+      # Publish runs only after tests pass AND only on the default branch.
+      # This is the conditional gate: PRs and feature branches never publish
+      # and never touch the OIDC credentials.
+      - build-and-publish:
+          context:
+            - aws-oidc          # restricted context: role ARN + config
+          requires:
+            - test
+          filters:
+            branches:
+              only:
+                - main
