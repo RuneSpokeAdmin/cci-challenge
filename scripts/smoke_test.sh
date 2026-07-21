@@ -22,6 +22,18 @@ docker run -d --rm --name smoke-db --network "${NET}" \
   -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=widgets cimg/postgres:16.4 >/dev/null
 
+# 2b. Wait for Postgres to actually accept connections before starting the app,
+#     otherwise the app crashes on boot trying to reach a not-yet-ready DB.
+echo "Waiting for Postgres to be ready..."
+for i in $(seq 1 30); do
+  if docker run --rm --network "${NET}" cimg/postgres:16.4 \
+       pg_isready -h smoke-db -U postgres >/dev/null 2>&1; then
+    echo "Postgres is ready."
+    break
+  fi
+  sleep 2
+done
+
 # 3. The app, named "smoke-app", pointed at Postgres by its container name.
 docker run -d --rm --name smoke-app --network "${NET}" \
   -e DATABASE_URL="postgresql://postgres:postgres@smoke-db:5432/widgets" \
