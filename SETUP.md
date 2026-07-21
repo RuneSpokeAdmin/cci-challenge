@@ -6,8 +6,8 @@ publishes to Amazon ECR over OIDC. Budget ~20 minutes.
 ## 0. Prerequisites
 
 - A public GitHub repo (fork/clone this into one)
-- A CircleCI account connected to that repo
-- An AWS account you control
+- A CircleCI account connected to this repo
+- An AWS account you control, AWS CLI installed (recomended)
 
 ---
 
