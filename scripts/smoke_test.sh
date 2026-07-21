@@ -1,32 +1,47 @@
 #!/usr/bin/env bash
-# Post-build smoke test: runs the freshly built image as a container, wired to
-# the same Postgres sidecar, and asserts the live /health endpoint returns 200.
-# This proves the *image* works - not just the source - before we publish it.
+# Post-build smoke test: runs the freshly built image against a throwaway
+# Postgres, both on a shared Docker network, and asserts /health returns 200.
+# Everything is container-to-container by name - no reliance on the script's
+# own localhost, which does not reach the remote Docker engine.
 set -euo pipefail
 
 IMAGE="${1:?usage: smoke_test.sh <image-ref>}"
-NETWORK_DB_URL="${DATABASE_URL:?DATABASE_URL must be set}"
+NET="smoke-net"
 
-echo "Starting container from ${IMAGE}..."
-CONTAINER_ID=$(docker run -d --rm \
-  --network host \
-  -e DATABASE_URL="${NETWORK_DB_URL}" \
-  "${IMAGE}")
-
-cleanup() { docker stop "${CONTAINER_ID}" >/dev/null 2>&1 || true; }
+cleanup() {
+  docker rm -f smoke-app smoke-db >/dev/null 2>&1 || true
+  docker network rm "${NET}" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
+# 1. Private network the two containers share.
+docker network create "${NET}" >/dev/null 2>&1 || true
+
+# 2. Postgres, named "smoke-db", reachable by that name on the network.
+docker run -d --rm --name smoke-db --network "${NET}" \
+  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=widgets cimg/postgres:16.4 >/dev/null
+
+# 3. The app, named "smoke-app", pointed at Postgres by its container name.
+docker run -d --rm --name smoke-app --network "${NET}" \
+  -e DATABASE_URL="postgresql://postgres:postgres@smoke-db:5432/widgets" \
+  "${IMAGE}" >/dev/null
+
+# 4. Health check FROM A CONTAINER on the same network, reaching the app
+#    by its name. Never touches the script's own localhost.
 echo "Waiting for app to come up..."
-for i in $(seq 1 20); do
-  if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+for i in $(seq 1 30); do
+  if docker run --rm --network "${NET}" curlimages/curl:8.10.1 \
+       -fsS "http://smoke-app:8000/health" >/dev/null 2>&1; then
     echo "Smoke test passed: /health returned 200."
-    curl -fsS http://localhost:8000/health
+    docker run --rm --network "${NET}" curlimages/curl:8.10.1 \
+       -fsS "http://smoke-app:8000/health"
     echo
     exit 0
   fi
-  sleep 1
+  sleep 2
 done
 
 echo "ERROR: app did not pass smoke test in time." >&2
-docker logs "${CONTAINER_ID}" || true
+docker logs smoke-app || true
 exit 1
