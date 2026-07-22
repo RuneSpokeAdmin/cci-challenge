@@ -122,17 +122,11 @@ jobs:
             echo "export IMAGE_LOCAL=${IMAGE_LOCAL}" >> "$BASH_ENV"
             docker build -t "${IMAGE_LOCAL}" .
 
-      # Bring up a throwaway Postgres to smoke-test the built image against.
+# The script creates its own Docker network and brings up a throwaway
+      # Postgres, so the built image is verified as a running container.
       - run:
           name: Smoke-test the built image (shell script)
-          command: |
-            docker network create ci || true
-            docker run -d --rm --name pg \
-              -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres \
-              -e POSTGRES_DB=widgets -p 5432:5432 cimg/postgres:16.4
-            # give the DB a moment; the script polls health afterward
-            sleep 8
-            ./scripts/smoke_test.sh "${IMAGE_LOCAL}"
+          command: ./scripts/smoke_test.sh "${IMAGE_LOCAL}"
 
       # --- OIDC: exchange CircleCI identity token for short-lived AWS creds ---
       # No static AWS keys exist anywhere. The role ARN lives in a restricted
