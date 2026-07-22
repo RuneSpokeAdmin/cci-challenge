@@ -13,7 +13,7 @@ static cloud credential sitting around waiting to leak.
 
 Most teams standing up their first container pipeline hit the same three walls:
 
-1. **Testing against a real database is a pain**, so people mock it — but a mock
+1. **Testing against a real database is a pain**, so people mock it, but a mock
    just returns whatever you told it to. It never catches a broken migration or
    a query that fails on the real engine. You end up testing your assumptions
    instead of your code.
