@@ -194,6 +194,7 @@ one service to an org-wide standard — you just harden it and package it as an 
 
 None of this worked first try. These are the four things that broke, in case
 you're building something similar and hit the same walls.
+These were all discovered and diagnosable through the CircleCI stack trace presented in the live Pipeline runs.
 
 **Python couldn't find the app module.** pytest died instantly with
 `ModuleNotFoundError: No module named 'app'`. It ran fine locally but not in CI,
@@ -243,3 +244,5 @@ docker run ... curl ... || true
 
 `|| true` exempts that one command from `set -e`. Strictness is good, but you
 have to carve out the commands you don't actually care about.
+
+These were all discovered and diagnosable through the CircleCI stack trace presented in the live Pipeline runs
