@@ -1,132 +1,117 @@
-# Setup Guide
+# Demo Setup Guide
 
-Everything needed to take this repo from clone to a green CircleCI build that
-publishes to Amazon ECR over OIDC. Budget ~20 minutes.
+How to take this repo from clone to a green CircleCI build that publishes to
+Amazon ECR over OIDC. About 20 minutes. This walks the AWS Console path (the
+click-through), since that's the most legible way to see what's connected to
+what. The values shown are the ones this pipeline was built with — swap in your
+own account ID, region, and org ID.
 
-## 0. Prerequisites
+## What you need first
 
-- A public GitHub repo (fork/clone this into one)
-- A CircleCI account connected to this repo
-- An AWS account you control, AWS CLI installed (recomended)
+- A public GitHub repo with this code in it
+- A CircleCI account connected to that repo
+- An AWS account you control
+
+The four things we're going to build: an ECR repo (where the image lands), an
+OIDC identity provider (so AWS recognizes CircleCI), an IAM role (the permissions
+CircleCI gets to borrow), and a CircleCI context (where the role's ID lives,
+locked to approved builds).
 
 ---
 
 ## 1. Create the ECR repository
 
-```bash
-aws ecr create-repository --repository-name widgets-api --region us-east-1
-```
+This is where the pipeline pushes the image.
 
-Note the region you use; you will need it again.
+- AWS Console -> **ECR** -> **Create repository**
+- Visibility: **Private** (keep it private — the passing build log is the proof
+  it published; there's no reason to expose the registry)
+- Name: `cci/widgets-api`
+- Leave the rest at defaults (Mutable tags, AES-256 encryption, etc) -> **Create**
 
----
-
-## 2. Wire up OIDC between CircleCI and AWS
-
-CircleCI issues every job a signed OIDC token. AWS is configured to trust that
-token and hand back short-lived credentials. **No AWS access keys are ever
-stored in CircleCI.**
-
-### 2a. Get your CircleCI Organization ID
-
-CircleCI → **Organization Settings → Overview → Organization ID**. Copy it.
-
-### 2b. Create the OIDC identity provider in AWS
-
-- Provider URL: `https://oidc.circleci.com/org/<ORG_ID>`
-- Audience: `<ORG_ID>`
-
-```bash
-ORG_ID=<your-org-id>
-aws iam create-open-id-connect-provider \
-  --url "https://oidc.circleci.com/org/${ORG_ID}" \
-  --client-id-list "${ORG_ID}" \
-  --thumbprint-list "9e99a48a9960b14926bb7f3b02e22da2b0ab7280"
-```
-
-### 2c. Create an IAM role the job can assume
-
-Trust policy (`trust.json`) — this is what enforces *only approved builds*:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": {
-      "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/oidc.circleci.com/org/<ORG_ID>"
-    },
-    "Action": "sts:AssumeRoleWithWebIdentity",
-    "Condition": {
-      "StringEquals": {
-        "oidc.circleci.com/org/<ORG_ID>:aud": "<ORG_ID>"
-      }
-    }
-  }]
-}
-```
-
-```bash
-aws iam create-role \
-  --role-name circleci-ecr-publisher \
-  --assume-role-policy-document file://trust.json
-
-aws iam put-role-policy \
-  --role-name circleci-ecr-publisher \
-  --policy-name ecr-push \
-  --policy-document '{
-    "Version": "2012-10-17",
-    "Statement": [{
-      "Effect": "Allow",
-      "Action": [
-        "ecr:GetAuthorizationToken",
-        "ecr:BatchCheckLayerAvailability",
-        "ecr:InitiateLayerUpload",
-        "ecr:UploadLayerPart",
-        "ecr:CompleteLayerUpload",
-        "ecr:PutImage"
-      ],
-      "Resource": "*"
-    }]
-  }'
-```
-
-Copy the role ARN it prints.
+You'll get a URI like `091303277324.dkr.ecr.us-east-1.amazonaws.com/cci/widgets-api`.
+The account ID at the front (here `091303277324`) and the region (`us-east-1`)
+both matter later =, so save them.
 
 ---
 
-## 3. Create the restricted CircleCI context
+## 2. Register CircleCI as an OIDC provider in AWS
 
-CircleCI → **Organization Settings → Contexts → Create Context** → name it
-`aws-oidc`. Add these environment variables:
+This allows AWS to trust the signed token CircleCI hands each build. You need
+your **CircleCI Organization ID** first: CircleCI -> Organization Settings ->
+Overview -> Organization ID. It's a UUID like
+`efec6bbc-8eca-45bc-a2d7-2fda82b794bf`.
 
-| Variable | Value |
+- AWS Console -> **IAM** -> **Identity providers** -> **Add provider**
+- Provider type: **OpenID Connect**
+- Provider URL: `https://oidc.circleci.com/org/<YOUR_ORG_ID>`
+- Click **Get thumbprint** (this grabs CircleCI's cert fingerprint so AWS can
+  verify the token really came from CircleCI)
+- Audience: `<YOUR_ORG_ID>` (yes, the org ID again)
+- **Add provider**
+
+At this point AWS *recognizes* CircleCI, but hasn't given it permission to do
+anything. That's the next step.
+
+---
+
+## 3. Create the IAM role CircleCI assumes
+
+A role is a set of permissions plus a rule about who's allowed to use them.
+
+- IAM -> **Roles** -> **Create role**
+- Trusted entity type: **Web identity**
+- Identity provider: the `oidc.circleci.com/org/<YOUR_ORG_ID>` one you just made
+- Audience: your org ID
+- **Next** -> attach a permissions policy. Search **ECR** and select
+  `AmazonEC2ContainerRegistryPowerUser` (grants push/pull to ECR). This is a bit
+  broad — for production you'd scope it down to just the ECR push actions on this
+  one repo. Fine for a reference pipeline.
+- **Next** -> name it `circleci-ecr-publisher` -> **Create role**
+
+Open the finished role and copy its **ARN** from the top — it looks like:
+
+```
+arn:aws:iam::091303277324:role/circleci-ecr-publisher
+```
+
+That ARN is the thing the pipeline was failing on when it was empty during initial setup
+(`RoleArn, value: 0`). It's the last missing piece.
+
+---
+
+## 4. Create the restricted CircleCI context
+
+The context is where the role ARN lives, and it's what makes "credentials only
+reachable by approved builds" true — only the main-only publish job reads it.
+
+- CircleCI -> **Organization Settings** -> **Contexts** -> **Create Context**
+- Name it exactly `aws-oidc`
+- Add three environment variables:
+
+| Name | Value |
 |---|---|
-| `AWS_OIDC_ROLE_ARN` | the role ARN from step 2c |
-| `AWS_REGION` | e.g. `us-east-1` |
-| `ECR_REPO_NAME` | `widgets-api` |
+| `AWS_OIDC_ROLE_ARN` | `arn:aws:iam::091303277324:role/circleci-ecr-publisher` |
+| `AWS_REGION` | `us-east-1` |
+| `ECR_REPO_NAME` | `cci/widgets-api` |
 
-> The context is what limits credentials to approved builds. Because the
-> `build-and-publish` job only runs on `main`, and only that job uses the
-> context, PRs and feature branches can never reach these values.
-
-*(Optional but recommended: restrict the context to a security group so only
-approved users/branches can consume it.)*
+Because the `build-and-publish` job only runs on `main` and only that job uses
+this context, a PR or feature branch can never read these values.
 
 ---
 
-## 4. Push and watch it go green
+## 5. Push and watch it go green
 
 ```bash
-git push origin main
+git commit --allow-empty -m "Trigger build with OIDC wired up"
+git push
 ```
 
-- On a **PR / feature branch**: only the `test` job runs. No publish, no creds.
+- On a **PR or feature branch**: only `test` runs. No build, no publish, no
+  credentials touched.
 - On **`main`**: `test` runs, then `build-and-publish` builds the image,
-  smoke-tests it, assumes the role via OIDC, and pushes to ECR.
+  smoke-tests it, trades its OIDC token for temporary AWS credentials, and pushes
+  to ECR.
 
-Confirm the image landed:
-
-```bash
-aws ecr list-images --repository-name widgets-api --region us-east-1
-```
+Confirm the image landed — AWS Console -> ECR -> `cci/widgets-api`, you'll see it
+tagged with the commit SHA and `latest`.
