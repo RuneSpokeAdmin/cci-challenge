@@ -7,13 +7,15 @@ static cloud credential sitting around waiting to leak.
 - **Repository:** https://github.com/RuneSpokeAdmin/cci-challenge
 - **Passing build:** https://app.circleci.com/pipelines/circleci/WdMV6fYgJiD46iDHM48FP4/34d8b38f-8f84-4ac5-9f7d-5f9d0f0f6089/6/details?useNewPipelines=true&workflowId=b6af7020-7693-41d7-8b07-eab729f459ca
 
+- **Most Recent Passing Build 07/22/26**: https://app.circleci.com/pipelines/circleci/WdMV6fYgJiD46iDHM48FP4/34d8b38f-8f84-4ac5-9f7d-5f9d0f0f6089/11/details?useNewPipelines=true&workflowId=38b77a19-a7b7-4d1f-b9f4-977d5ff3db28&job=f8c961ee-414e-4059-8bce-30ed9868c98e&buildNumber=22&jobType=build
+
 ---
 
 ## What problem this solves
 
 Most teams standing up their first container pipeline hit the same three walls:
 
-1. **Testing against a real database is a pain**, so people mock it, but a mock
+1. **Testing against a real database is a pain**, so people mock it — but a mock
    just returns whatever you told it to. It never catches a broken migration or
    a query that fails on the real engine. You end up testing your assumptions
    instead of your code.
@@ -194,7 +196,6 @@ one service to an org-wide standard — you just harden it and package it as an 
 
 None of this worked first try. These are the four things that broke, in case
 you're building something similar and hit the same walls.
-These were all discovered and diagnosable through the CircleCI stack trace presented in the live Pipeline runs.
 
 **Python couldn't find the app module.** pytest died instantly with
 `ModuleNotFoundError: No module named 'app'`. It ran fine locally but not in CI,
@@ -244,5 +245,3 @@ docker run ... curl ... || true
 
 `|| true` exempts that one command from `set -e`. Strictness is good, but you
 have to carve out the commands you don't actually care about.
-
-These were all discovered and diagnosable through the CircleCI stack trace presented in the live Pipeline runs
